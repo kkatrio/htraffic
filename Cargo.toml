@@ -1,0 +1,8 @@
+[package]
+name = "htraffic"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+reqwest = { version = "0.12.22", features = ["native-tls-alpn"] }
+tokio = { version = "1.20", features = ["full"] }
