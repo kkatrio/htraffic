@@ -5,5 +5,7 @@ edition = "2021"
 
 [dependencies]
 axum = "0.8.4"
-reqwest = { version = "0.12.22", features = ["native-tls-alpn"] }
+reqwest = { version = "0.12.22", features = ["rustls-tls"] }
 tokio = { version = "1.20", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"] }

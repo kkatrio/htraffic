@@ -1,15 +1,23 @@
 use axum::extract::Query;
+use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
-use reqwest::{Client, ClientBuilder, Version};
-use std::collections::HashMap;
+use clap::Parser;
+use reqwest::{Client, ClientBuilder};
+use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
 use tokio::time;
 
-const URL: &str = "https://google.com";
+#[derive(Parser, Debug)]
+#[command(author, version, about)]
+pub struct Config {
+    /// The URL to send HTTP/2 traffic to
+    #[arg(short, long)]
+    pub path: String,
+}
 
 struct Connection {
     client: Client,
@@ -17,19 +25,26 @@ struct Connection {
     connection_id: usize,
 }
 
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct Params {
+    pub connections: Option<usize>,
+    pub tps: Option<u64>,
+}
+
 impl Connection {
     fn new(id: usize) -> Connection {
         Self {
             client: ClientBuilder::new()
                 .http2_prior_knowledge()
+                .use_rustls_tls()
                 .build()
                 .unwrap(),
             connection_id: id,
         }
     }
 
-    async fn send(&self, notify: Arc<Notify>) {
-        let mut interval = time::interval(time::Duration::from_millis(1000));
+    async fn send(&self, notify: Arc<Notify>, interval: u64, url: &str) {
+        let mut interval = time::interval(time::Duration::from_micros(interval));
 
         println!("sending HTTP/2.0 from connection: {}", self.connection_id);
         loop {
@@ -40,22 +55,26 @@ impl Connection {
                 }
                 _ = async {
                     interval.tick().await;
-                    let resp = self.client.get(URL).send().await.unwrap();
-                    assert_eq!(resp.version(), Version::HTTP_2);
+                    let _ = self.client.get(url).send().await.unwrap();
+                    //assert_eq!(resp.version(), Version::HTTP_2);
                 } => {}
             }
         }
     }
 }
 
-async fn root_handler(Query(params): Query<HashMap<String, String>>, tx: mpsc::Sender<String>) {
-    for (k, v) in params {
-        println!("key: {}, value: {}", k, v);
-        tx.send(v).await.unwrap();
+async fn root_handler(Query(params): Query<Params>, tx: mpsc::Sender<Params>) -> impl IntoResponse {
+    if params.connections.is_some() && params.tps.is_some() {
+        if let Err(e) = tx.send(params.clone()).await {
+            eprintln!("failed to send params with: {e}");
+        }
+        format!("Sent: {params:?}")
+    } else {
+        "Missing required query parameters: 'connections' and 'tps'".into()
     }
 }
 
-async fn start_api_server(tx: mpsc::Sender<String>) {
+async fn start_api_server(tx: mpsc::Sender<Params>) {
     // build our application with a route
     let app = Router::new()
         // `GET /` goes to `root`
@@ -67,6 +86,9 @@ async fn start_api_server(tx: mpsc::Sender<String>) {
 
 #[tokio::main]
 async fn main() {
+    let config = Config::parse();
+    let url = Arc::new(config.path);
+
     // pass info to traffic tasks sent by the api server
     let (tx, mut rx) = mpsc::channel(32);
     // store connection handles
@@ -80,9 +102,13 @@ async fn main() {
     tokio::spawn(start_api_server(tx.clone()));
 
     // blocks the main thread
-    while let Some(n) = rx.recv().await {
-        let n = n.parse::<usize>().expect("can't parse to usize");
-        println!("n: {}", n);
+    while let Some(params) = rx.recv().await {
+        let n = params.connections.expect("connections param should exist");
+        let tps = params.tps.expect("tps param should exist");
+        println!("received connections: {}, tps: {}", n, tps);
+
+        // todo: handle this some other way
+        let interval = if tps != 0 { 1000000 / tps } else { u64::MAX };
 
         if n == conn_id {
             continue;
@@ -93,9 +119,10 @@ async fn main() {
                 conn_id += 1;
                 // pass one on each task
                 let notify = notify.clone();
+                let url = url.clone();
                 set.spawn(async move {
                     let connection = Connection::new(conn_id);
-                    connection.send(notify).await;
+                    connection.send(notify, interval, &url).await;
                 });
             }
         } else {
