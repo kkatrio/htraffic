@@ -3,7 +3,6 @@ use reqwest::{Client, ClientBuilder};
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
-use tokio::sync::Notify;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time;
 use tracing_subscriber;
@@ -32,12 +31,11 @@ struct Connection {
 }
 
 struct Worker {
-    id: usize,
     pub task: JoinHandle<()>,
 }
 
 impl Worker {
-    fn new(id: usize, url: &'static str, client: Client, interval: Arc<Mutex<u64>>) -> Worker {
+    fn new(id: String, url: &'static str, client: Client, interval: Arc<Mutex<u64>>) -> Worker {
         let intv = {
             let guard = interval.lock().unwrap();
             *guard
@@ -49,47 +47,53 @@ impl Worker {
         let task = tokio::spawn(async move {
             loop {
                 interval.tick().await;
-                println!("sending from client with id {}", id);
+                println!("sending from worker with id {}", id);
                 let resp = client.get(url).send().await.unwrap();
                 let _body = resp.bytes().await.unwrap();
             }
         });
 
-        Worker { id, task }
+        Worker { task }
+    }
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        println!("dropping worker...");
+        self.task.abort();
     }
 }
 
 impl Connection {
     fn new(id: usize, interval: Arc<Mutex<u64>>, url: &'static str) -> Connection {
-        // internally!
         let client = ClientBuilder::new()
             .http2_prior_knowledge()
             .use_rustls_tls()
             .connection_verbose(true)
             .build()
             .unwrap();
-        //let client = Arc::new(client);
 
-        let mut worker_threads = Vec::with_capacity(2);
-        for id in 0..2 {
+        let mut workers = Vec::with_capacity(2);
+        for i in 0..2 {
             let client = client.clone();
             let interval = interval.clone();
-            worker_threads.push(Worker::new(id, url, client, interval))
+            let worker_id = format!("{}-{}", id.to_string(), i.to_string());
+            workers.push(Worker::new(worker_id, url, client, interval))
         }
 
         Self {
             connection_id: id,
             interval: interval,
-            workers: worker_threads,
+            workers: workers,
         }
     }
 
     async fn wait_workers(&mut self) {
-        println!("awaiting workers");
-        let mut outputs = Vec::with_capacity(self.workers.len());
+        println!("awaiting workers for connection: {}", self.connection_id);
+        let mut task_handles = Vec::with_capacity(self.workers.len());
         for worker in &mut self.workers {
             let task = &mut worker.task;
-            outputs.push(task.await.unwrap());
+            task_handles.push(task.await.unwrap());
         }
         unreachable!()
     }
@@ -138,20 +142,16 @@ fn update_interval(interval: &Arc<Mutex<u64>>, mps: u64) {
 async fn main() {
     tracing_subscriber::fmt::init();
     let config = Config::parse();
-    //let url = Arc::new(config.path);
 
     let url: &'static str = Box::leak(config.path.into_boxed_str());
-
     let interval = Arc::new(Mutex::new(3));
-
     // pass info to traffic tasks sent by the api server
     let (tx, mut rx) = mpsc::channel(32);
     // store connection handles
-    let mut set = JoinSet::new();
+    let mut connections = JoinSet::new();
+    let mut abort_handles = Vec::<tokio::task::AbortHandle>::new();
     // identify each connection
     let mut conn_id = 0;
-    // notify client loop to break when dropping connections
-    let notify = Arc::new(Notify::new());
 
     // spawn the api server
     tokio::spawn(start_api_server(tx.clone()));
@@ -167,30 +167,30 @@ async fn main() {
         if n == conn_id {
             continue;
         } else if n > conn_id {
-            // creating new connections
             let new = n - conn_id;
             for _ in 0..new {
                 conn_id += 1;
-                // pass one on each task
-                let _notify = notify.clone();
                 let interval = interval.clone();
-                set.spawn(async move {
-                    let mut connection = Connection::new(conn_id, interval, &url);
-                    connection.wait_workers().await;
-                    //connection.send(notify).await;
+                let ah = connections.spawn(async move {
+                    let mut conn = Connection::new(conn_id, interval, &url);
+                    conn.wait_workers().await;
                 });
+                abort_handles.push(ah);
+                println!(
+                    "abort handles len after adding new: {}",
+                    abort_handles.len()
+                )
             }
         } else {
             // dropping connections
             let drop_n = conn_id - n;
             for _ in 0..drop_n {
-                //println!("sending notify_one");
-                notify.notify_one();
                 conn_id -= 1;
+                if let Some(ah) = abort_handles.pop() {
+                    ah.abort();
+                    println!("abort handles len after abort: {}", abort_handles.len())
+                }
             }
         }
     }
-
-    // not necessary, since the receiver blocks
-    //set.join_all().await;
 }
