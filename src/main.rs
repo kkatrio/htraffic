@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time;
+use tracing::{debug, info, span, Level};
 use tracing_subscriber;
 
 mod api_server;
@@ -40,14 +41,14 @@ impl Worker {
             let guard = interval.lock().unwrap();
             *guard
         };
-        println!("worker id: {}, ntv: {}", id, intv);
+        info!("worker id: {}, ntv: {}", id, intv);
 
         let mut interval = time::interval(time::Duration::from_micros(intv));
 
         let task = tokio::spawn(async move {
             loop {
                 interval.tick().await;
-                println!("sending from worker with id {}", id);
+                debug!("sending from worker with id {}", id);
                 let resp = client.get(url).send().await.unwrap();
                 let _body = resp.bytes().await.unwrap();
             }
@@ -59,7 +60,7 @@ impl Worker {
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        println!("dropping worker...");
+        info!("dropping worker...");
         self.task.abort();
     }
 }
@@ -69,7 +70,6 @@ impl Connection {
         let client = ClientBuilder::new()
             .http2_prior_knowledge()
             .use_rustls_tls()
-            .connection_verbose(true)
             .build()
             .unwrap();
 
@@ -89,7 +89,7 @@ impl Connection {
     }
 
     async fn wait_workers(&mut self) {
-        println!("awaiting workers for connection: {}", self.connection_id);
+        info!("awaiting workers for connection: {}", self.connection_id);
         let mut task_handles = Vec::with_capacity(self.workers.len());
         for worker in &mut self.workers {
             let task = &mut worker.task;
@@ -156,11 +156,14 @@ async fn main() {
     // spawn the api server
     tokio::spawn(start_api_server(tx.clone()));
 
+    let span = span!(Level::INFO, "main");
+    let _guard = span.enter();
+
     // blocks the main thread
     while let Some(params) = rx.recv().await {
         let n = params.connections.expect("connections param should exist");
         let tps = params.tps.expect("tps param should exist");
-        println!("received: connections: {}, tps: {}", n, tps);
+        info!("received: connections: {}, tps: {}", n, tps);
 
         update_interval(&interval, tps);
 
@@ -176,7 +179,7 @@ async fn main() {
                     conn.wait_workers().await;
                 });
                 abort_handles.push(ah);
-                println!(
+                debug!(
                     "abort handles len after adding new: {}",
                     abort_handles.len()
                 )
@@ -188,7 +191,7 @@ async fn main() {
                 conn_id -= 1;
                 if let Some(ah) = abort_handles.pop() {
                     ah.abort();
-                    println!("abort handles len after abort: {}", abort_handles.len())
+                    debug!("abort handles len after abort: {}", abort_handles.len())
                 }
             }
         }
