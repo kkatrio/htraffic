@@ -1,8 +1,7 @@
 use clap::Parser;
 use reqwest::{Client, ClientBuilder};
 use serde::Deserialize;
-use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time;
 use tracing::{debug, info, span, Level};
@@ -23,11 +22,11 @@ pub struct Config {
 pub struct Params {
     pub connections: Option<usize>,
     pub tps: Option<u64>,
+    pub workers: Option<usize>,
 }
 
 struct Connection {
     connection_id: usize,
-    interval: Arc<Mutex<u64>>,
     workers: Vec<Worker>,
 }
 
@@ -36,21 +35,25 @@ struct Worker {
 }
 
 impl Worker {
-    fn new(id: String, url: &'static str, client: Client, interval: Arc<Mutex<u64>>) -> Worker {
-        let intv = {
-            let guard = interval.lock().unwrap();
-            *guard
-        };
-        info!("worker id: {}, ntv: {}", id, intv);
-
-        let mut interval = time::interval(time::Duration::from_micros(intv));
-
+    fn new(id: String, url: &'static str, client: Client, mut wrx: watch::Receiver<u64>) -> Worker {
         let task = tokio::spawn(async move {
+            let mut intv = *wrx.borrow();
+            let mut interval = time::interval(time::Duration::from_micros(intv));
             loop {
-                interval.tick().await;
-                debug!("sending from worker with id {}", id);
-                let resp = client.get(url).send().await.unwrap();
-                let _body = resp.bytes().await.unwrap();
+                tokio::select! {
+                    _ = wrx.changed() => {
+                        intv = *wrx.borrow();
+                        interval = time::interval(time::Duration::from_micros(intv));
+                        debug!("interval changed, duration: {} ms", interval.period().as_millis());
+                    }
+                    _ = interval.tick() => {
+                        debug!("sending from worker {}", id);
+                        // TODO: step counter here
+                        let resp = client.get(url).send().await.unwrap();
+                        let _body = resp.bytes().await.unwrap();
+                        // TODO: step counter here
+                    }
+                }
             }
         });
 
@@ -66,30 +69,38 @@ impl Drop for Worker {
 }
 
 impl Connection {
-    fn new(id: usize, interval: Arc<Mutex<u64>>, url: &'static str) -> Connection {
+    // should watch_rx be a reference here?
+    fn new(
+        id: usize,
+        url: &'static str,
+        watch_rx: watch::Receiver<u64>,
+        number_of_workers: usize,
+    ) -> Connection {
         let client = ClientBuilder::new()
             .http2_prior_knowledge()
             .use_rustls_tls()
             .build()
             .unwrap();
 
-        let mut workers = Vec::with_capacity(2);
-        for i in 0..2 {
+        let mut workers = Vec::with_capacity(number_of_workers);
+        for i in 0..number_of_workers {
             let client = client.clone();
-            let interval = interval.clone();
+            let watch_rx = watch_rx.clone();
             let worker_id = format!("{}-{}", id.to_string(), i.to_string());
-            workers.push(Worker::new(worker_id, url, client, interval))
+            workers.push(Worker::new(worker_id, url, client, watch_rx))
         }
 
         Self {
             connection_id: id,
-            interval: interval,
             workers: workers,
         }
     }
 
     async fn wait_workers(&mut self) {
-        info!("awaiting workers for connection: {}", self.connection_id);
+        info!(
+            "awaiting workers for connection with id: {}",
+            self.connection_id
+        );
         let mut task_handles = Vec::with_capacity(self.workers.len());
         for worker in &mut self.workers {
             let task = &mut worker.task;
@@ -97,45 +108,6 @@ impl Connection {
         }
         unreachable!()
     }
-
-    //async fn send(&self, notify: Arc<Notify>) {
-    //    println!("sending HTTP/2.0 from connection: {}", self.connection_id);
-
-    //    let mut intv = {
-    //        let guard = self.interval.lock().unwrap();
-    //        *guard
-    //    };
-    //    let mut interval = time::interval(time::Duration::from_micros(intv));
-
-    //    loop {
-    //        let new_intv = {
-    //            let guard = self.interval.lock().unwrap();
-    //            *guard
-    //        };
-    //        if new_intv != intv {
-    //            println!("changing interval");
-    //            intv = new_intv;
-    //            interval = time::interval(time::Duration::from_micros(intv));
-    //        }
-
-    //        tokio::select! {
-    //            _ = notify.notified() => {
-    //                println!("notification received -- dropping connection");
-    //                break;
-    //            }
-    //            _ = interval.tick() => {
-    //                //println!("period: {}, tick at: {:?}",  interval.period().as_micros(), Instant::now());
-    //                println!("send from multiple?");
-    //                self.send_from_all_workers().await;
-    //            }
-    //        }
-    //    }
-    //}
-}
-
-fn update_interval(interval: &Arc<Mutex<u64>>, mps: u64) {
-    let mut iguard = interval.lock().unwrap();
-    *iguard = if mps != 0 { 1000000 / mps } else { u64::MAX };
 }
 
 #[tokio::main]
@@ -144,14 +116,18 @@ async fn main() {
     let config = Config::parse();
 
     let url: &'static str = Box::leak(config.path.into_boxed_str());
-    let interval = Arc::new(Mutex::new(3));
-    // pass info to traffic tasks sent by the api server
+    // pass Params received by the api server to main thread
     let (tx, mut rx) = mpsc::channel(32);
     // store connection handles
     let mut connections = JoinSet::new();
     let mut abort_handles = Vec::<tokio::task::AbortHandle>::new();
     // identify each connection
     let mut conn_id = 0;
+
+    // pass interval change to all workers
+    // an initial value does nothing, since the connections/workers are created when we receive the
+    // tps param.
+    let (wtx, wrx) = watch::channel(0);
 
     // spawn the api server
     tokio::spawn(start_api_server(tx.clone()));
@@ -163,9 +139,23 @@ async fn main() {
     while let Some(params) = rx.recv().await {
         let n = params.connections.expect("connections param should exist");
         let tps = params.tps.expect("tps param should exist");
-        info!("received: connections: {}, tps: {}", n, tps);
+        let workers = params.workers.expect("workers param should exist");
+        // TODO: handle None -- if the query does not include parameter
+        info!(
+            "received: connections: {}, tps: {}, workers: {}",
+            n, tps, workers
+        );
 
-        update_interval(&interval, tps);
+        debug!("start -- receivers: {}", wtx.receiver_count());
+
+        // tps to interval
+        let interval = if tps != 0 { 1000000 / tps } else { u64::MAX };
+        // wpli traffic to workers, each worker waits more
+        let interval = interval * workers as u64;
+        info!("interval per worker: {} micros", interval);
+
+        // sending tps to all workers
+        wtx.send(interval).unwrap();
 
         if n == conn_id {
             continue;
@@ -173,15 +163,16 @@ async fn main() {
             let new = n - conn_id;
             for _ in 0..new {
                 conn_id += 1;
-                let interval = interval.clone();
+                let wrx = wrx.clone();
                 let ah = connections.spawn(async move {
-                    let mut conn = Connection::new(conn_id, interval, &url);
+                    let mut conn = Connection::new(conn_id, &url, wrx, workers);
                     conn.wait_workers().await;
                 });
                 abort_handles.push(ah);
                 debug!(
-                    "abort handles len after adding new: {}",
-                    abort_handles.len()
+                    "added connection: active connections: {} -- receivers: {}",
+                    abort_handles.len(),
+                    wtx.receiver_count()
                 )
             }
         } else {
@@ -191,7 +182,11 @@ async fn main() {
                 conn_id -= 1;
                 if let Some(ah) = abort_handles.pop() {
                     ah.abort();
-                    debug!("abort handles len after abort: {}", abort_handles.len())
+                    debug!(
+                        "aborted connection: active connections: {} -- receivers: {}",
+                        abort_handles.len(),
+                        wtx.receiver_count()
+                    )
                 }
             }
         }

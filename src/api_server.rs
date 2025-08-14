@@ -7,7 +7,8 @@ use tokio::sync::mpsc;
 use tracing::{error, info, span, Level};
 
 async fn root_handler(Query(params): Query<Params>, tx: mpsc::Sender<Params>) -> impl IntoResponse {
-    if params.connections.is_some() && params.tps.is_some() {
+    if params.connections.is_some() && params.tps.is_some() && params.workers.is_some() {
+        // TODO: log what we received here
         if let Err(e) = tx.send(params.clone()).await {
             error!("failed to send params with: {e}");
         }
