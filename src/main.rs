@@ -23,6 +23,8 @@ pub struct Params {
     pub connections: Option<usize>,
     pub tps: Option<u64>,
     pub workers: Option<usize>,
+    pub key: Option<String>,
+    pub cert: Option<String>,
 }
 
 struct Connection {
@@ -39,6 +41,7 @@ impl Worker {
         let task = tokio::spawn(async move {
             let mut intv = *wrx.borrow();
             let mut interval = time::interval(time::Duration::from_micros(intv));
+
             loop {
                 tokio::select! {
                     _ = wrx.changed() => {
@@ -75,10 +78,14 @@ impl Connection {
         url: &'static str,
         watch_rx: watch::Receiver<u64>,
         number_of_workers: usize,
+        pem: String,
     ) -> Connection {
+        let identity = reqwest::Identity::from_pem(pem.as_bytes()).unwrap();
+
         let client = ClientBuilder::new()
             .http2_prior_knowledge()
             .use_rustls_tls()
+            .identity(identity)
             .build()
             .unwrap();
 
@@ -140,6 +147,11 @@ async fn main() {
         let n = params.connections.expect("connections param should exist");
         let tps = params.tps.expect("tps param should exist");
         let workers = params.workers.expect("workers param should exist");
+        let key = params.key.expect("key param should exist");
+        let cert = params.cert.expect("cert param should exist");
+
+        let pem = format!("{}\n{}", cert.trim(), key.trim());
+
         // TODO: handle None -- if the query does not include parameter
         info!(
             "received: connections: {}, tps: {}, workers: {}",
@@ -164,8 +176,10 @@ async fn main() {
             for _ in 0..new {
                 conn_id += 1;
                 let wrx = wrx.clone();
+                let pem = pem.clone();
+                println!("pem: {}", pem);
                 let ah = connections.spawn(async move {
-                    let mut conn = Connection::new(conn_id, &url, wrx, workers);
+                    let mut conn = Connection::new(conn_id, &url, wrx, workers, pem);
                     conn.wait_workers().await;
                 });
                 abort_handles.push(ah);
