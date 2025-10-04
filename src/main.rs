@@ -55,18 +55,25 @@ async fn main() {
 
     // blocks the main thread
     while let Some(params) = rx.recv().await {
-        let n = params.connections.expect("connections param should exist");
-        let tps = params.tps.expect("tps param should exist");
-        let workers = params.workers.expect("workers param should exist");
+        let n = params.connections.expect("connections param must exist");
+        let tps = params.tps.expect("tps param must exist");
+        let workers = params.workers.expect("workers param must exist");
 
-        let key = params.key.expect("key param should exist");
-        let cert = params.cert.expect("cert param should exist");
-        let key = fs::read_to_string(key).unwrap();
-        let cert = fs::read_to_string(cert).unwrap();
+        // TODO: improve this
+        let pem = if let Some(key) = params.key {
+            if let Some(cert) = params.cert {
+                let key = fs::read_to_string(key).expect("should read the whole key file");
+                let cert = fs::read_to_string(cert).expect("should read the whole cert file");
+                let pem = format!("{}\n{}", cert.trim(), key.trim());
+                info!("got pem file: {}", pem);
+                Some(pem)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
-        let pem = format!("{}\n{}", cert.trim(), key.trim());
-
-        // TODO: handle None -- if the query does not include parameter
         info!(
             "received: connections: {}, tps: {}, workers: {}",
             n, tps, workers
@@ -91,7 +98,6 @@ async fn main() {
                 conn_id += 1;
                 let wrx = wrx.clone();
                 let pem = pem.clone();
-                debug!("pem: {}", pem);
                 let ah = connections.spawn(async move {
                     let mut conn = Connection::new(conn_id, &url, wrx, workers, pem);
                     conn.wait_workers().await;

@@ -1,8 +1,44 @@
-use reqwest::{Client, ClientBuilder};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
+
+#[derive(Clone)]
+pub struct ConnectionClient {
+    client: reqwest::Client,
+}
+
+impl ConnectionClient {
+    fn builder() -> ConnectionClientBuilder {
+        ConnectionClientBuilder {
+            inner: reqwest::ClientBuilder::new()
+                // always http2, always rust_tls for now
+                .http2_prior_knowledge()
+                .use_rustls_tls(),
+        }
+    }
+}
+
+struct ConnectionClientBuilder {
+    inner: reqwest::ClientBuilder,
+}
+
+impl ConnectionClientBuilder {
+    fn build(self) -> ConnectionClient {
+        ConnectionClient {
+            client: self.inner.build().unwrap(),
+        }
+    }
+
+    fn identity(mut self, identity: reqwest::Identity) -> Self {
+        self.inner = self
+            .inner
+            .identity(identity)
+            .danger_accept_invalid_certs(true)
+            .danger_accept_invalid_hostnames(true);
+        self
+    }
+}
 
 pub struct Connection {
     connection_id: usize,
@@ -16,19 +52,20 @@ impl Connection {
         url: &'static str,
         watch_rx: watch::Receiver<u64>,
         number_of_workers: usize,
-        pem: String,
+        pem: Option<String>,
     ) -> Connection {
-        let identity = reqwest::Identity::from_pem(pem.as_bytes()).unwrap();
-
-        let client = ClientBuilder::new()
-            .http2_prior_knowledge()
-            .use_rustls_tls()
-            .identity(identity)
-            .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true)
-            .build()
-            .unwrap();
-
+        let mut builder = ConnectionClient::builder();
+        if let Some(pem) = pem {
+            let identity = match reqwest::Identity::from_pem(pem.as_bytes()) {
+                Ok(id) => id,
+                Err(e) => {
+                    error!("Failed to parse pem file: {e}");
+                    panic!();
+                }
+            };
+            builder = builder.identity(identity);
+        };
+        let client = builder.build();
         let mut workers = Vec::with_capacity(number_of_workers);
         for i in 0..number_of_workers {
             let client = client.clone();
@@ -62,7 +99,12 @@ struct Worker {
 }
 
 impl Worker {
-    fn new(id: String, url: &'static str, client: Client, mut wrx: watch::Receiver<u64>) -> Worker {
+    fn new(
+        id: String,
+        url: &'static str,
+        connection: ConnectionClient,
+        mut wrx: watch::Receiver<u64>,
+    ) -> Worker {
         let task = tokio::spawn(async move {
             let mut intv = *wrx.borrow();
             let mut interval = time::interval(time::Duration::from_micros(intv));
@@ -77,7 +119,7 @@ impl Worker {
                     _ = interval.tick() => {
                         debug!("sending from worker {}", id);
                         // TODO: step counter here
-                        let resp = client.get(url).send().await.unwrap();
+                        let resp = connection.client.get(url).send().await.unwrap();
                         // TODO: measure the time(latency) between these two
                         let _body = resp.bytes().await.unwrap();
                         // TODO: wait fo a second, then send a RESET and kill this worker
