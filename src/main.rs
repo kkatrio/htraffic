@@ -1,11 +1,12 @@
 use clap::Parser;
-use reqwest::{Client, ClientBuilder};
 use serde::Deserialize;
+use std::fs;
 use tokio::sync::{mpsc, watch};
-use tokio::task::{JoinHandle, JoinSet};
-use tokio::time;
+use tokio::task::JoinSet;
 use tracing::{debug, info, span, Level};
 use tracing_subscriber;
+
+use htraffic::Connection;
 
 mod api_server;
 use api_server::start_api_server;
@@ -25,96 +26,6 @@ pub struct Params {
     pub workers: Option<usize>,
     pub key: Option<String>,
     pub cert: Option<String>,
-}
-
-struct Connection {
-    connection_id: usize,
-    workers: Vec<Worker>,
-}
-
-struct Worker {
-    pub task: JoinHandle<()>,
-}
-
-impl Worker {
-    fn new(id: String, url: &'static str, client: Client, mut wrx: watch::Receiver<u64>) -> Worker {
-        let task = tokio::spawn(async move {
-            let mut intv = *wrx.borrow();
-            let mut interval = time::interval(time::Duration::from_micros(intv));
-
-            loop {
-                tokio::select! {
-                    _ = wrx.changed() => {
-                        intv = *wrx.borrow();
-                        interval = time::interval(time::Duration::from_micros(intv));
-                        debug!("interval changed, duration: {} ms", interval.period().as_millis());
-                    }
-                    _ = interval.tick() => {
-                        debug!("sending from worker {}", id);
-                        // TODO: step counter here
-                        let resp = client.get(url).send().await.unwrap();
-                        let _body = resp.bytes().await.unwrap();
-                        // TODO: step counter here
-                    }
-                }
-            }
-        });
-
-        Worker { task }
-    }
-}
-
-impl Drop for Worker {
-    fn drop(&mut self) {
-        info!("dropping worker...");
-        self.task.abort();
-    }
-}
-
-impl Connection {
-    // should watch_rx be a reference here?
-    fn new(
-        id: usize,
-        url: &'static str,
-        watch_rx: watch::Receiver<u64>,
-        number_of_workers: usize,
-        pem: String,
-    ) -> Connection {
-        let identity = reqwest::Identity::from_pem(pem.as_bytes()).unwrap();
-
-        let client = ClientBuilder::new()
-            .http2_prior_knowledge()
-            .use_rustls_tls()
-            .identity(identity)
-            .build()
-            .unwrap();
-
-        let mut workers = Vec::with_capacity(number_of_workers);
-        for i in 0..number_of_workers {
-            let client = client.clone();
-            let watch_rx = watch_rx.clone();
-            let worker_id = format!("{}-{}", id.to_string(), i.to_string());
-            workers.push(Worker::new(worker_id, url, client, watch_rx))
-        }
-
-        Self {
-            connection_id: id,
-            workers: workers,
-        }
-    }
-
-    async fn wait_workers(&mut self) {
-        info!(
-            "awaiting workers for connection with id: {}",
-            self.connection_id
-        );
-        let mut task_handles = Vec::with_capacity(self.workers.len());
-        for worker in &mut self.workers {
-            let task = &mut worker.task;
-            task_handles.push(task.await.unwrap());
-        }
-        unreachable!()
-    }
 }
 
 #[tokio::main]
@@ -147,8 +58,11 @@ async fn main() {
         let n = params.connections.expect("connections param should exist");
         let tps = params.tps.expect("tps param should exist");
         let workers = params.workers.expect("workers param should exist");
+
         let key = params.key.expect("key param should exist");
         let cert = params.cert.expect("cert param should exist");
+        let key = fs::read_to_string(key).unwrap();
+        let cert = fs::read_to_string(cert).unwrap();
 
         let pem = format!("{}\n{}", cert.trim(), key.trim());
 
@@ -177,7 +91,7 @@ async fn main() {
                 conn_id += 1;
                 let wrx = wrx.clone();
                 let pem = pem.clone();
-                println!("pem: {}", pem);
+                debug!("pem: {}", pem);
                 let ah = connections.spawn(async move {
                     let mut conn = Connection::new(conn_id, &url, wrx, workers, pem);
                     conn.wait_workers().await;
