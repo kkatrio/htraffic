@@ -3,6 +3,8 @@ use tokio::task::JoinHandle;
 use tokio::time;
 use tracing::{debug, error, info};
 
+pub mod metrics;
+
 #[derive(Clone)]
 pub struct ConnectionClient {
     client: reqwest::Client,
@@ -118,12 +120,15 @@ impl Worker {
                     }
                     _ = interval.tick() => {
                         debug!("sending from worker {}", id);
-                        // TODO: step counter here
                         let resp = connection.client.get(url).send().await.unwrap();
+                        metrics::inc_requests_sent();
+
                         // TODO: measure the time(latency) between these two
+                        //
                         let _body = resp.bytes().await.unwrap();
+                        metrics::inc_responses_received();
+
                         // TODO: wait fo a second, then send a RESET and kill this worker
-                        // TODO: step counter here
                     }
                 }
             }

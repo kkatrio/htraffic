@@ -6,6 +6,8 @@ use axum::Router;
 use tokio::sync::mpsc;
 use tracing::{error, info, span, Level};
 
+use htraffic::metrics;
+
 async fn root_handler(Query(params): Query<Params>, tx: mpsc::Sender<Params>) -> impl IntoResponse {
     if params.connections.is_some() && params.tps.is_some() && params.workers.is_some() {
         // TODO: log what we received here
@@ -18,13 +20,18 @@ async fn root_handler(Query(params): Query<Params>, tx: mpsc::Sender<Params>) ->
     }
 }
 
+async fn metrics_handler() -> impl IntoResponse {
+    metrics::print_metrics()
+}
+
 pub async fn start_api_server(tx: mpsc::Sender<Params>) {
     // is the same span always be used in the root_handler?
     let span = span!(Level::INFO, "api_server");
     let _guard = span.enter();
     let app = Router::new()
         // `GET /` goes to `root`
-        .route("/", get(move |q| root_handler(q, tx)));
+        .route("/", get(move |q| root_handler(q, tx)))
+        .route("/metrics", get(metrics_handler));
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     info!("started api server on 0.0.0.0:3000");
