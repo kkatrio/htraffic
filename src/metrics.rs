@@ -33,7 +33,7 @@ pub(crate) fn inc_stream_timeouts() {
 pub fn print_metrics() -> String {
     let sent = format!(
         "requests_sent {}",
-        METRICS.requests_sent.load(Ordering::SeqCst).to_string()
+        METRICS.requests_sent.load(Ordering::Relaxed).to_string()
     );
     let received = format!(
         "responses_received {}",
@@ -42,6 +42,17 @@ pub fn print_metrics() -> String {
             .load(Ordering::SeqCst)
             .to_string()
     );
+    let tls_failures = format!(
+        "tls_failures {}",
+        METRICS.tls_failures.load(Ordering::Relaxed).to_string()
+    );
+    let stream_timeouts = format!(
+        "stream_timeouts {}",
+        METRICS.stream_timeouts.load(Ordering::Relaxed).to_string()
+    );
 
-    format!("{}\n{}", sent, received)
+    format!(
+        "{}\n{}\n{}\n{}\n",
+        sent, received, tls_failures, stream_timeouts
+    )
 }
