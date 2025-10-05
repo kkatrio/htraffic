@@ -45,7 +45,7 @@ async fn main() {
     // pass interval change to all workers
     // an initial value does nothing, since the connections/workers are created when we receive the
     // tps param.
-    let (wtx, wrx) = watch::channel(0);
+    let (interval_sender, interval_receiver) = watch::channel(0);
 
     // spawn the api server
     tokio::spawn(start_api_server(tx.clone()));
@@ -79,16 +79,18 @@ async fn main() {
             n, tps, workers
         );
 
-        debug!("start -- receivers: {}", wtx.receiver_count());
+        debug!("start -- receivers: {}", interval_sender.receiver_count());
 
         // tps to interval
+        // 1000000 micros over the number of requests per second gives the interval between
+        //         requests
         let interval = if tps != 0 { 1000000 / tps } else { u64::MAX };
         // wpli traffic to workers, each worker waits more
         let interval = interval * workers as u64;
         info!("interval per worker: {} micros", interval);
 
         // sending tps to all workers
-        wtx.send(interval).unwrap();
+        interval_sender.send(interval).unwrap();
 
         if n == conn_id {
             continue;
@@ -96,7 +98,7 @@ async fn main() {
             let new = n - conn_id;
             for _ in 0..new {
                 conn_id += 1;
-                let wrx = wrx.clone();
+                let wrx = interval_receiver.clone();
                 let pem = pem.clone();
                 let ah = connections.spawn(async move {
                     let mut conn = Connection::new(conn_id, &url, wrx, workers, pem);
@@ -106,7 +108,7 @@ async fn main() {
                 debug!(
                     "added connection: active connections: {} -- receivers: {}",
                     abort_handles.len(),
-                    wtx.receiver_count()
+                    interval_sender.receiver_count()
                 )
             }
         } else {
@@ -119,7 +121,7 @@ async fn main() {
                     debug!(
                         "aborted connection: active connections: {} -- receivers: {}",
                         abort_handles.len(),
-                        wtx.receiver_count()
+                        interval_sender.receiver_count()
                     )
                 }
             }

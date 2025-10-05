@@ -52,7 +52,7 @@ impl Connection {
     pub fn new(
         id: usize,
         url: &'static str,
-        watch_rx: watch::Receiver<u64>,
+        interval_receiver: watch::Receiver<u64>,
         number_of_workers: usize,
         pem: Option<String>,
     ) -> Connection {
@@ -71,9 +71,9 @@ impl Connection {
         let mut workers = Vec::with_capacity(number_of_workers);
         for i in 0..number_of_workers {
             let client = client.clone();
-            let watch_rx = watch_rx.clone();
+            let interval_receiver = interval_receiver.clone();
             let worker_id = format!("{}-{}", id.to_string(), i.to_string());
-            workers.push(Worker::new(worker_id, url, client, watch_rx))
+            workers.push(Worker::new(worker_id, url, client, interval_receiver))
         }
 
         Self {
@@ -102,19 +102,19 @@ struct Worker {
 
 impl Worker {
     fn new(
-        id: String,
+        _id: String,
         url: &'static str,
         connection: ConnectionClient,
-        mut wrx: watch::Receiver<u64>,
+        mut interval_receiver: watch::Receiver<u64>,
     ) -> Worker {
         let task = tokio::spawn(async move {
-            let mut intv = *wrx.borrow();
+            let mut intv = *interval_receiver.borrow();
             let mut interval = time::interval(time::Duration::from_micros(intv));
 
             loop {
                 tokio::select! {
-                    _ = wrx.changed() => {
-                        intv = *wrx.borrow();
+                    _ = interval_receiver.changed() => {
+                        intv = *interval_receiver.borrow();
                         interval = time::interval(time::Duration::from_micros(intv));
                         debug!("interval changed, duration: {} ms", interval.period().as_millis());
                     }
