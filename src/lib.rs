@@ -119,16 +119,38 @@ impl Worker {
                         debug!("interval changed, duration: {} ms", interval.period().as_millis());
                     }
                     _ = interval.tick() => {
-                        debug!("sending from worker {}", id);
+
                         let resp = connection.client.get(url).send().await.unwrap();
                         metrics::inc_requests_sent();
 
                         // TODO: measure the time(latency) between these two
                         //
-                        let _body = resp.bytes().await.unwrap();
-                        metrics::inc_responses_received();
+                        let body_fut = resp.bytes();
 
-                        // TODO: wait fo a second, then send a RESET and kill this worker
+                        match time::timeout(time::Duration::from_millis(1000), body_fut).await {
+
+                            Ok(Ok(_resp_bytes)) => {
+                                metrics::inc_responses_received();
+                            }
+                            Ok(Err(e)) => {
+                                error!("response received within the timeout but it is an Error: {}", e);
+
+                                if e.to_string().contains("cannot decrypt peer's message") {
+                                    metrics::inc_tls_failures();
+                                    info!("ignoring tls failure, try another request");
+                                    continue;
+                                }
+
+                            }
+                            Err(e) => {
+                                // timeout reached -- dropping resp
+                                // since the client did not receive the response, implicitly it
+                                // sends RST_STREAM
+                                metrics::inc_stream_timeouts();
+                                error!("stream timeout occured: {}", e);
+                            }
+
+                        }
                     }
                 }
             }
