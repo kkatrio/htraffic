@@ -5,6 +5,7 @@ struct Metrics {
     responses_received: AtomicU64,
     stream_timeouts: AtomicU64,
     tls_failures: AtomicU64,
+    refused_streams: AtomicU64,
 }
 
 static METRICS: Metrics = Metrics {
@@ -12,6 +13,7 @@ static METRICS: Metrics = Metrics {
     responses_received: AtomicU64::new(0),
     stream_timeouts: AtomicU64::new(0),
     tls_failures: AtomicU64::new(0),
+    refused_streams: AtomicU64::new(0),
 };
 
 pub(crate) fn inc_requests_sent() {
@@ -28,6 +30,10 @@ pub(crate) fn inc_tls_failures() {
 
 pub(crate) fn inc_stream_timeouts() {
     METRICS.stream_timeouts.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn inc_refused_streams() {
+    METRICS.refused_streams.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn print_metrics() -> String {

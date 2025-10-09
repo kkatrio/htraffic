@@ -1,3 +1,5 @@
+use std::error::Error;
+
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time;
@@ -120,8 +122,38 @@ impl Worker {
                     }
                     _ = interval.tick() => {
 
-                        let resp = connection.client.get(url).send().await.unwrap();
-                        metrics::inc_requests_sent();
+                        let resp = connection.client.post(url).body("nothing interesting").send().await;
+
+                        let resp = match resp {
+                            Ok(resp) => {
+                                metrics::inc_requests_sent();
+                                resp
+                            }
+                            Err(e) => {
+                                if let Some(hyper_err) = e.source().and_then(|source| source.downcast_ref::<hyper::Error>()) {
+                                    if let Some(h2_err) = hyper_err.source().and_then(|source| source.downcast_ref::<h2::Error>()) {
+                                        match h2_err.reason() {
+                                            Some(h2::Reason::REFUSED_STREAM) => {
+                                                error!("got REFUSED_STREAM, ignoring");
+                                                metrics::inc_refused_streams();
+                                                continue;
+                                            }
+                                            Some(reason) => {
+                                                error!("got reason: {}, ignoring", reason.description());
+                                                continue;
+                                            }
+                                            None => {
+                                                error!("got h2 error, but without any known reason!");
+                                                panic!();
+                                            }
+                                        }
+                                    }
+                                }
+                                error!("error received but with no source");
+                                panic!()
+                            }
+                        };
+
 
                         // TODO: measure the time(latency) between these two
                         //
@@ -135,6 +167,7 @@ impl Worker {
                             Ok(Err(e)) => {
                                 error!("response received within the timeout but it is an Error: {}", e);
 
+                                // TODO: move this above
                                 if e.to_string().contains("cannot decrypt peer's message") {
                                     metrics::inc_tls_failures();
                                     info!("ignoring tls failure, try another request");
