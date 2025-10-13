@@ -25,7 +25,7 @@ async fn metrics_handler() -> impl IntoResponse {
 }
 
 pub async fn start_api_server(tx: mpsc::Sender<Params>) {
-    // is the same span always be used in the root_handler?
+    // is the same span always used in the root_handler?
     let span = span!(Level::INFO, "api_server");
     let _guard = span.enter();
     let app = Router::new()

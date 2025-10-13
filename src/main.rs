@@ -65,7 +65,6 @@ async fn main() {
                 let key = fs::read_to_string(key).expect("should read the whole key file");
                 let cert = fs::read_to_string(cert).expect("should read the whole cert file");
                 let pem = format!("{}\n{}", cert.trim(), key.trim());
-                info!("got pem file: {}", pem);
                 Some(pem)
             } else {
                 None

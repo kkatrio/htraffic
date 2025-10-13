@@ -18,7 +18,8 @@ impl ConnectionClient {
             inner: reqwest::ClientBuilder::new()
                 // always http2, always rust_tls for now
                 .http2_prior_knowledge()
-                .use_rustls_tls(),
+                .use_rustls_tls()
+                .pool_max_idle_per_host(0),
         }
     }
 }
@@ -122,7 +123,7 @@ impl Worker {
                     }
                     _ = interval.tick() => {
 
-                        let resp = connection.client.post(url).body("nothing interesting").send().await;
+                        let resp = connection.client.get(url).send().await;
 
                         let resp = match resp {
                             Ok(resp) => {
@@ -136,27 +137,29 @@ impl Worker {
                                             Some(h2::Reason::REFUSED_STREAM) => {
                                                 error!("got REFUSED_STREAM, ignoring");
                                                 metrics::inc_refused_streams();
-                                                continue;
                                             }
                                             Some(reason) => {
                                                 error!("got reason: {}, ignoring", reason.description());
-                                                continue;
                                             }
                                             None => {
-                                                error!("got h2 error, but without any known reason!");
-                                                panic!();
+                                                panic!("got h2 error, but without any known reason!");
                                             }
                                         }
                                     }
+                                    error!("could downcast to hyper error, but not to h2. error. source {:?}", hyper_err.source());
+                                    // we move to the next resp, no need to print this line again
+                                    // below
+                                    continue;
                                 }
-                                error!("error received but with no source");
-                                panic!()
+                                metrics::inc_unable_to_send();
+                                error!("error received -- not downcast to hyper error. source: {:?}", e.source());
+                                // in any error (downcast or not) we continut with the next resp, so we do not care about
+                                // returning the same as in the Ok branch
+                                continue;
                             }
                         };
 
-
-                        // TODO: measure the time(latency) between these two
-                        //
+                        // wait until we read the whole response
                         let body_fut = resp.bytes();
 
                         match time::timeout(time::Duration::from_millis(1000), body_fut).await {

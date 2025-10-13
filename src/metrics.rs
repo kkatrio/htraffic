@@ -6,6 +6,7 @@ struct Metrics {
     stream_timeouts: AtomicU64,
     tls_failures: AtomicU64,
     refused_streams: AtomicU64,
+    unable_to_send: AtomicU64,
 }
 
 static METRICS: Metrics = Metrics {
@@ -14,6 +15,7 @@ static METRICS: Metrics = Metrics {
     stream_timeouts: AtomicU64::new(0),
     tls_failures: AtomicU64::new(0),
     refused_streams: AtomicU64::new(0),
+    unable_to_send: AtomicU64::new(0),
 };
 
 pub(crate) fn inc_requests_sent() {
@@ -32,10 +34,15 @@ pub(crate) fn inc_stream_timeouts() {
     METRICS.stream_timeouts.fetch_add(1, Ordering::Relaxed);
 }
 
+pub(crate) fn inc_unable_to_send() {
+    METRICS.unable_to_send.fetch_add(1, Ordering::Relaxed);
+}
+
 pub(crate) fn inc_refused_streams() {
     METRICS.refused_streams.fetch_add(1, Ordering::Relaxed);
 }
 
+// TODO: print from the metrics struct
 pub fn print_metrics() -> String {
     let sent = format!(
         "requests_sent {}",
@@ -45,7 +52,7 @@ pub fn print_metrics() -> String {
         "responses_received {}",
         METRICS
             .responses_received
-            .load(Ordering::SeqCst)
+            .load(Ordering::Relaxed)
             .to_string()
     );
     let tls_failures = format!(
@@ -56,9 +63,17 @@ pub fn print_metrics() -> String {
         "stream_timeouts {}",
         METRICS.stream_timeouts.load(Ordering::Relaxed).to_string()
     );
+    let unable_to_send = format!(
+        "unable_to_send {}",
+        METRICS.unable_to_send.load(Ordering::Relaxed).to_string()
+    );
+    let refused_streams = format!(
+        "refused_streams {}",
+        METRICS.refused_streams.load(Ordering::Relaxed).to_string()
+    );
 
     format!(
-        "{}\n{}\n{}\n{}\n",
-        sent, received, tls_failures, stream_timeouts
+        "{}\n{}\n{}\n{}\n{}\n{}\n",
+        sent, received, tls_failures, stream_timeouts, unable_to_send, refused_streams
     )
 }
